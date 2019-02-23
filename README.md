@@ -1,2 +1,30 @@
 # VRC-Bakery-Adapter
 A script that handles converting Bakery RNM and SH directional lightmap bindings into a format that VRChat can process without the Bakery scripts being whitelisted
+
+This script is only necessary if you are using the RNM or SH directional light modes on Bakery.
+
+If the Bakery scripts get whitelisted this script won’t be needed and the directional lightmaps will just work in game. Please vote on the Canny for this if you have a moment: https://vrchat.canny.io/feature-requests/p/whitelist-bakery-gpu-lightmapper
+
+
+#### Examples
+##### Using dominant direcional mode
+<img src="https://i.imgur.com/oU5wqEz.jpg" width="70%" height="70%">
+
+##### Using the SH direcional mode that this script enables in VRC
+<img src="https://i.imgur.com/a0nI8UH.jpg" width="70%" height="70%">
+
+
+#### Why Bakery breaks in VRC and what the script does
+Bakery uses a script to bind material [property blocks](https://docs.unity3d.com/ScriptReference/MaterialPropertyBlock.html) per renderer at runtime. These property blocks contain references to the directional lightmaps that Bakery uses for RNM and SH modes, the property blocks also specify the lightmap mode that the shaders use. Since these scripts aren't currently whitelisted, they cannot set these property blocks in game.
+
+TCL originally demonstrated that adding properties to the materials for these lightmaps and then setting them manually to the Bakery lightmaps per material allowed the lightmaps to function properly in VRChat. This script automates that process and creates unique materials for each combination of material and directional lightmap binding that is used. This is necessary because the mapping between materials and property blocks on their renders is not always 1-to-1.
+
+This also handles automatically patching the Bakery shaders to add the properties they need to work with VRC. This patch does not interfere with the usual operation of Bakery.
+
+#### Instructions
+1. Download and install the latest release off the releases page (there's only 1 at the moment)
+2. Make a new object in the scene that will handle managing the bakery materials
+3. Add a VRC Bakery Adapter component to the object
+4. In order to take advantage of SH or RNM lightmaps you need to change any lightmapped assets from using Standard to Bakery's version of Standard. There is a utility under the *Utilities* dropdown to do this automatically. Click *Standard->Bakery SH/RNM* to replace the shaders on all materials in the replacement scope with their Bakery counterparts SH or RNM will automatically be determined by the lightmap directional mode you have selected. If you want lightmap-based specular highlights click the one *w/ Lightmap Specular*. This will not replace transparent Standard materials by default since Bakery transparency does not get sorted correctly by VRC.
+5. Once you are ready to upload your world to VRC, click the *Run Conversion* button. This will process all the materials into a format VRC can use.
+6. *Important* after you have finished uploading your world, click the *Revert Materials* button on the adapter. If you do not revert them, then any changes to the materials will get overwritten with old settings the next time you run the conversion.
