@@ -23,7 +23,7 @@ This also handles automatically patching the Bakery shaders to add the propertie
 
 #### Instructions
 1. Make sure Bakery is imported into your project.
-2. Download and install the latest release off the releases page. (there's only 1 at the moment)
+2. Download and install the latest release off the [releases](https://github.com/Merlin-san/VRC-Bakery-Adapter/releases) page. 
 3. Make a new object in the scene that will handle managing the bakery materials.
 4. Add a VRC Bakery Adapter component to the object.
 5. Select a replacement scope for the object. The default *Scene* replacement scope should be enough for almost all situations, but if you have some odd case where you want to have different settings for different groups of objects you may use the *Children* replacement scope to only replace Bakery materials belonging to renderers on the children of the adapter object.
