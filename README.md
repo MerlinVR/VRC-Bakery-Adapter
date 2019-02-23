@@ -1,4 +1,4 @@
-# VRC-Bakery-Adapter
+# VRC Bakery Adapter
 A script that handles converting Bakery RNM and SH directional lightmap bindings into a format that VRChat can process without the Bakery scripts being whitelisted
 
 This script is only necessary if you are using the RNM or SH directional light modes on Bakery.
