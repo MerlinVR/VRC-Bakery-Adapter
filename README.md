@@ -21,8 +21,11 @@ TCL originally demonstrated that adding properties to the materials for these li
 
 This also handles automatically patching the Bakery shaders to add the properties they need to work with VRC. This patch does not interfere with the usual operation of Bakery.
 
+#### The component on an object
+<img src="https://i.imgur.com/5XWPgpY.png" width="50%" height="50%">
+
 #### Instructions
-1. Make sure Bakery is imported into your project.
+1. Make sure Bakery is imported into your project and you have baked lightmaps using the RNM or SH directional lightmap mode.
 2. Download and install the latest release off the [releases](https://github.com/Merlin-san/VRC-Bakery-Adapter/releases) page. 
 3. Make a new object in the scene that will handle managing the bakery materials.
 4. Add a VRC Bakery Adapter component to the object.
