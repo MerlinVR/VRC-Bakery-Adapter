@@ -76,7 +76,6 @@ public class VRCBakeryAdapter : MonoBehaviour
     public RendererMaterialList[] OriginalRendererMaterials;
     public int LightmapMode = 3; // Default to SH
     public ReplacementScope replacementScope = ReplacementScope.Scene;
-    public bool patchedShaders = false;
     public bool includeInactiveObjects = false;
     public string currentRevertPath = "";
 
@@ -127,6 +126,8 @@ public class VRCBakeryAdapter : MonoBehaviour
             }
 
             currentRevertPath = "";
+
+            Debug.Log("Reverted Materials");
         }
     }
 
@@ -278,6 +279,13 @@ public class VRCBakeryAdapter : MonoBehaviour
 
         // Backup revert settings
         SaveReversionProfile();
+
+        // Be extra sure the materials are saved and such before the upload comes around.
+        AssetDatabase.SaveAssets();
+        EditorSceneManager.MarkSceneDirty(gameObject.scene);
+        AssetDatabase.SaveAssets();
+
+        Debug.Log("Converted Bakery materials for VRChat");
     }
 
     // Just a debug thing if people want to see a list of the renderers affected for some reason.
@@ -357,17 +365,12 @@ public class VRCBakeryAdapter : MonoBehaviour
         const string standardPath = "Assets/Bakery/shader/BakeryStandard.shader";
         const string standardSpecPath = "Assets/Bakery/shader/BakeryStandardSpecular.shader";
 
-        if (!patchedShaders)
+        bool patchedStandard = PatchShader(standardPath);
+        bool patchedStandardSpec = PatchShader(standardSpecPath);
+        
+        if (patchedStandard && patchedStandardSpec)
         {
-            bool patchedStandard = PatchShader(standardPath);
-            bool patchedStandardSpec = PatchShader(standardSpecPath);
-
-            patchedShaders = patchedStandard && patchedStandardSpec;
-
-            if (patchedShaders)
-            {
-                Debug.Log("Successfully patched Bakery shaders.");
-            }
+            Debug.Log("Successfully patched Bakery shaders.");
         }
     }
 
