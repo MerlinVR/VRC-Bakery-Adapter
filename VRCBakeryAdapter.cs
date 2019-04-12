@@ -38,6 +38,7 @@ using System.Runtime.Serialization.Formatters.Binary;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using System.Text.RegularExpressions;
 
 [Serializable]
 public class RendererMaterialList
@@ -78,16 +79,29 @@ public class VRCBakeryAdapter : MonoBehaviour
     public ReplacementScope replacementScope = ReplacementScope.Scene;
     public bool includeInactiveObjects = false;
     public string currentRevertPath = "";
+    public bool compileKeywords = true;
 
     // Utils vars
     public bool showUtilsPane = false;
     public bool replaceTransparentStandard = false;
+    
+    private Dictionary<string, Shader> shaderHashToCompiledShaderMap = new Dictionary<string, Shader>();
 
+    [Serializable]
+    struct KeyShaderPair
+    {
+        public string key;
+        public Shader shader;
+    }
+    [SerializeField]
+    private List<KeyShaderPair> serializedKeyShaderPairs = new List<KeyShaderPair>();
     void OnDestroy()
     {
         if (!EditorApplication.isPlayingOrWillChangePlaymode && !EditorApplication.isPlaying)
         {
-            RevertMaterials();
+            // Don't cleanup the shaders when destroyed because OnDestroy will be called on application exit. I attempted to use the OnApplicationQuit event to detect this, but it does not seem to function.
+            // So here we are; for now you will get shaders lying around if you delete the component without reverting the materials...
+            RevertMaterials(false);
         }
     }
 
@@ -100,7 +114,7 @@ public class VRCBakeryAdapter : MonoBehaviour
         return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLower();
     }
 
-    public void RevertMaterials()
+    public void RevertMaterials(bool cleanupShaders = true)
     {
         if (OriginalRendererMaterials != null)
         {
@@ -127,6 +141,18 @@ public class VRCBakeryAdapter : MonoBehaviour
 
             currentRevertPath = "";
 
+            // Cleanup
+            if (cleanupShaders)
+            {
+                foreach (var hashShader in serializedKeyShaderPairs)
+                {
+                    AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(hashShader.shader));
+                }
+            }
+
+            shaderHashToCompiledShaderMap.Clear();
+            serializedKeyShaderPairs.Clear();
+
             Debug.Log("Reverted Materials");
         }
     }
@@ -151,6 +177,337 @@ public class VRCBakeryAdapter : MonoBehaviour
         }
 
         return rendererList;
+    }
+
+    private string StripComments(string srcStr)
+    {
+        // Be lazy and do a 2 pass removal of commented sections of code, first block comments, then line comments
+
+        int currentIdx = 0;
+        string uncommentedString = "";
+        int copyRunLength = 0;
+
+        // Remove block comments
+        // Copy entire runs of uncommented code at a time because appending to a string char-by-char is slow as heck
+        while (currentIdx + copyRunLength < srcStr.Length)
+        {
+            if (srcStr[currentIdx + copyRunLength] == '/' && currentIdx + copyRunLength + 1 < srcStr.Length && srcStr[currentIdx + copyRunLength + 1] == '*')
+            {
+                uncommentedString += srcStr.Substring(currentIdx, copyRunLength);
+                currentIdx += copyRunLength;
+                copyRunLength = 0;
+
+                // This logic for handling nested comments doesn't seem necessary since it's apparently not valid syntax but I'll keep it just in case ¯\_(ツ)_/¯
+                int depth = 0;
+                do
+                {
+                    if (srcStr[currentIdx] == '/' && srcStr[currentIdx + 1] == '*')
+                        depth++;
+                    else if (srcStr[currentIdx] == '*' && srcStr[currentIdx + 1] == '/')
+                        depth--;
+
+                    currentIdx++;
+                } while (depth > 0 && currentIdx < srcStr.Length - 1);
+
+                currentIdx++;
+            }
+            else
+            {
+                copyRunLength++;
+            }
+        }
+
+        if (copyRunLength > 0)
+        {
+            uncommentedString += srcStr.Substring(currentIdx, copyRunLength);
+        }
+
+        string uncommentedString2 = "";
+
+        // Remove line comments
+        StringReader reader = new StringReader(uncommentedString);
+        string line = "";
+        while ((line = reader.ReadLine()) != null)
+        {
+            int commentStartIdx = line.IndexOf("//");
+            if (commentStartIdx != -1)
+                line = line.Substring(0, commentStartIdx);
+
+            uncommentedString2 += line + "\r\n";
+        }
+
+        return uncommentedString2;
+    }
+
+    // Finds the end of the current scope beginning on the codeBlockStart '{' character
+    private int FindCodeBlockEnd(string srcStr, int codeBlockStart)
+    {
+        int blockEnd = codeBlockStart;
+        int depth = 0;
+
+        for (int i = codeBlockStart; i < srcStr.Length; i++)
+        {
+            if (srcStr[i] == '{')
+                depth++;
+            else if (srcStr[i] == '}')
+                depth--;
+
+            if (depth <= 0)
+            {
+                blockEnd = i;
+                break;
+            }
+        }
+
+        return blockEnd;
+    }
+
+    private bool IsValidKeyword(string keyword)
+    {
+        bool isValidKeyword = false;
+        foreach (char character in keyword)
+        {
+            // Cull keywords that end up being _, __, ___, etc since they are culled by Unity and not valid
+            if (character != '_' && character != ' ')
+            {
+                isValidKeyword = true;
+                break;
+            }
+        }
+
+        return isValidKeyword;
+    }
+
+    private int GetWhiteSpace(string line)
+    {
+        int whitespaceCount = 0;
+        for (int i = 0; i < line.Length; i++)
+        {
+            if (char.IsWhiteSpace(line[i]))
+                whitespaceCount++;
+            else
+                break;
+        }
+
+        return whitespaceCount;
+    }
+    private HashSet<string> ParseAvailablePassKeywords(string shaderText)
+    {
+        HashSet<string> availableKeywords = new HashSet<string>();
+        
+        // Gather shader_feature and multi_compile's
+        StringReader lineReader = new StringReader(shaderText);
+        string line = "";
+        while ((line = lineReader.ReadLine()) != null)
+        {
+            int startIdx = line.IndexOf("#pragma multi_compile ");
+
+            if (startIdx >= 0)
+            {
+                startIdx = line.IndexOf("multi_compile", startIdx);
+            }
+            else if (startIdx == -1)
+            {
+                startIdx = line.IndexOf("#pragma shader_feature ");
+                if (startIdx >= 0)
+                    startIdx = line.IndexOf("shader_feature", startIdx);
+            }
+            if (startIdx == -1)
+                continue;
+
+            // not needed anymore since comments are stripped as a pre-process step
+            //int commentIdx = line.IndexOf("//");
+            //if (commentIdx != -1 && commentIdx < startIdx)
+            //    continue;
+
+            // Skip to beginning of keyword list
+            startIdx = line.IndexOf(" ", startIdx);
+
+            string[] keywords = line.Substring(startIdx).Split(' ');
+
+            foreach (string keyword in keywords)
+            {
+                if (IsValidKeyword(keyword))
+                    availableKeywords.Add(keyword.Trim().ToUpper());
+            }
+        }
+
+        return availableKeywords;
+    }
+
+    private string ProcessPass(Material mat, string passCode)
+    {
+        string processedPass = "";
+
+        HashSet<string> passKeywords = ParseAvailablePassKeywords(passCode);
+        HashSet<string> usedKeywords = new HashSet<string>();
+        foreach (string keyword in mat.shaderKeywords)
+        {
+            if (IsValidKeyword(keyword) && passKeywords.Contains(keyword))
+                usedKeywords.Add(keyword);
+        }
+
+        StringReader reader = new StringReader(passCode);
+        string line = "";
+        while ((line = reader.ReadLine()) != null)
+        {
+            // Insert the #defines for this variant
+            if (line.Contains("CGPROGRAM") || line.Contains("HLSLPROGRAM"))
+            {
+                processedPass += line + "\r\n"; // Add the CGPROGRAM line
+
+                int whitespaceCount = GetWhiteSpace(line);
+
+                foreach (string keyword in usedKeywords)
+                {
+                    string defineStr = "#define " + keyword + " 1";
+                    defineStr = defineStr.PadLeft(whitespaceCount + defineStr.Length);
+
+                    processedPass += defineStr + "\r\n";
+                }
+            }
+            else if (line.Contains("#pragma shader_feature ") || line.Contains("#pragma multi_compile "))
+            {
+#if false
+                string outputStr = "// Removed shader_feature or multi_compile\r\n";
+                int whitespace = GetWhiteSpace(line);
+                outputStr = outputStr.PadLeft(whitespace + outputStr.Length);
+
+                processedPass += outputStr;
+#endif
+            }
+            else
+            {
+                processedPass += line + "\r\n";
+            }
+        }
+
+        return "Pass " + processedPass;
+    }
+
+    private Shader GenerateShaderVariation(Material mat)
+    {
+        // We only care about Bakery shaders
+        if (!mat.shader.name.Contains("Bakery"))
+            return mat.shader;
+
+        Shader originalShader = mat.shader;
+        string shaderPath = AssetDatabase.GetAssetPath(originalShader);
+        string shaderDirectory = Path.GetDirectoryName(Path.GetFullPath(shaderPath));
+
+        string[] keywords = mat.shaderKeywords;
+        Array.Sort(keywords, (x, y) => string.Compare(x, y));
+
+        string hashStr = shaderPath;
+        foreach (string keyword in keywords)
+            hashStr += keyword;
+
+        string shaderHash = ComputeMD5(hashStr);
+        Shader compiledShader = null;
+        if (shaderHashToCompiledShaderMap.TryGetValue(shaderHash, out compiledShader))
+        {
+            return compiledShader;
+        }
+
+        string shaderText = "";
+
+        try
+        {
+            using (StreamReader shaderReader = new StreamReader(shaderPath))
+            {
+                shaderText = shaderReader.ReadToEnd();
+            }
+        }
+        catch (IOException)
+        {
+            Debug.LogError("Failed to open Bakery shader to compile!");
+            return mat.shader;
+        }
+        
+        shaderText = StripComments(shaderText);
+
+        string finalShaderCode = "";
+
+        // Search for Passes to replace 
+        int passIdx = 0;
+        int lastPassIdx = 0;
+
+        // Run through all the passes that need #define's inserted
+        while (true)
+        {
+            lastPassIdx = passIdx;
+            passIdx = shaderText.IndexOf("Pass", passIdx, StringComparison.CurrentCultureIgnoreCase);
+
+            if (passIdx == -1)
+                break;
+
+            // Splice in all sections in between passes
+            finalShaderCode += shaderText.Substring(lastPassIdx, passIdx - lastPassIdx);
+
+            int passStartIdx = passIdx + 4;
+            while (passStartIdx < shaderText.Length)
+            {
+                char currentChar = shaderText[passStartIdx];
+                if (currentChar == '{')
+                    break;
+                else if (currentChar != ' ' && currentChar != '\n' && currentChar != '\r' && currentChar != '\t')
+                {
+                    passStartIdx = -1;
+                    break;
+                }
+
+                passStartIdx++;
+            }
+
+            // This isn't the pass we're looking for... It's some other piece of code that has the word 'pass' in it.
+            if (passStartIdx == -1)
+            {
+                finalShaderCode += shaderText.Substring(passIdx, 4);
+                passIdx += 4;
+                continue;
+            }
+
+            int passEndIdx = FindCodeBlockEnd(shaderText, passStartIdx) + 1;
+
+            finalShaderCode += ProcessPass(mat, shaderText.Substring(passStartIdx, passEndIdx - passStartIdx));
+
+            passIdx = passEndIdx;
+        }
+
+        // Patch in the last bit of code after the last pass
+        if (lastPassIdx < shaderText.Length)
+        {
+            finalShaderCode += shaderText.Substring(lastPassIdx);
+        }
+
+        // Give the shader a unique name under Hidden/<shader hash>
+        // In hindsight I probably should've just bit the bullet and did more of this using Regex
+        Regex shaderNameRegex = new Regex(@"Shader\s*""\w.+""\s*{", RegexOptions.IgnoreCase);
+        finalShaderCode = shaderNameRegex.Replace(finalShaderCode, "Shader \"Hidden/" + shaderHash + "\"\r\n{");
+
+        string savePath = Path.Combine(shaderDirectory, "generated_" + shaderHash + ".shader");
+        string savePathProject = Path.Combine(Path.GetDirectoryName(shaderPath), "generated_" + shaderHash + ".shader");
+
+        try
+        {
+            using (StreamWriter shaderWriter = new StreamWriter(savePath))
+            {
+                shaderWriter.Write(finalShaderCode);
+            }
+        }
+        catch (IOException)
+        {
+            Debug.LogError("Failed to write shader for variation " + mat.shader.name + " to " + savePath);
+            return mat.shader;
+        }
+
+        AssetDatabase.ImportAsset(savePathProject);
+        Shader generatedShader = AssetDatabase.LoadAssetAtPath<Shader>(savePathProject);
+
+        // Add to cache so we don't regenerate again
+        shaderHashToCompiledShaderMap.Add(shaderHash, generatedShader);
+
+        return generatedShader;
     }
 
     public void OnCollectMaterials()
@@ -243,6 +600,12 @@ public class VRCBakeryAdapter : MonoBehaviour
                                 newMaterial.SetTexture("_RNM2", RNM2);
                                 newMaterial.SetInt("bakeryLightmapMode", LightmapMode); // SH or RNM
 
+                                if (compileKeywords)
+                                {
+                                    newMaterial.shader = GenerateShaderVariation(newMaterial);
+                                    newMaterial.shaderKeywords = new string[0];
+                                }
+
                                 AssetDatabase.CreateAsset(newMaterial, savePath + "generatedbakery_" + materialFileName + "_" + matTexHash + ".mat");
 
                                 generatedMaterialList.Add(matTexHash, newMaterial);
@@ -284,6 +647,15 @@ public class VRCBakeryAdapter : MonoBehaviour
         AssetDatabase.SaveAssets();
         EditorSceneManager.MarkSceneDirty(gameObject.scene);
         AssetDatabase.SaveAssets();
+
+        // Flatten out the dictionary to a list so that Unity can serialize it...
+        serializedKeyShaderPairs.Clear();
+        foreach (var keyshader in shaderHashToCompiledShaderMap)
+        {
+            serializedKeyShaderPairs.Add(new KeyShaderPair() { key = keyshader.Key, shader = keyshader.Value });
+        }
+
+        shaderHashToCompiledShaderMap.Clear();
 
         Debug.Log("Converted Bakery materials for VRChat");
     }
@@ -680,6 +1052,7 @@ public class VRCBakeryAdapterInspector : Editor
     private static GUIContent replacementScopeLabel = new GUIContent("Replacement Scope", "Where to search for materials to replace. Scene scope will collect all materials in the scene this object belongs to. Child scope will collect all materials part of children gameobjects of this object.");
     private static GUIContent directionalModeLabel = new GUIContent("Lightmap Directional Mode", "The directional mode that the Bakery lightmaps have been baked with. If you aren't using either of these options, this adapter is not necessary.");
     private static GUIContent inactiveObjectsLabel = new GUIContent("Convert Inactive Objects", "If enabled, this will also modify the materials on disabled objects.");
+    private static GUIContent compileKeywordsLabel = new GUIContent("Compile Keywords", "Strips out Unity shader keywords from Bakery shaders and generates new static shaders with the proper keywords set via #defines. This lets your shaders continue to operate even when a player has run out of keywords.");
 
     VRCBakeryAdapter adapter = null;
     private static GUIContent[] lightmapDirectionalityModes =
@@ -710,6 +1083,7 @@ public class VRCBakeryAdapterInspector : Editor
         adapter.replacementScope = (ReplacementScope)EditorGUILayout.EnumPopup(replacementScopeLabel, adapter.replacementScope);
         adapter.LightmapMode = EditorGUILayout.IntPopup(directionalModeLabel, adapter.LightmapMode, lightmapDirectionalityModes, lightmapDirectionalityModeValues);
         adapter.includeInactiveObjects = EditorGUILayout.Toggle(inactiveObjectsLabel, adapter.includeInactiveObjects);
+        adapter.compileKeywords = EditorGUILayout.Toggle(compileKeywordsLabel, adapter.compileKeywords);
 
         if (EditorGUI.EndChangeCheck())
         {
