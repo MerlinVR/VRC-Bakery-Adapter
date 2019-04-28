@@ -86,6 +86,7 @@ public class VRCBakeryAdapter : MonoBehaviour
     public bool replaceTransparentStandard = false;
     
     private Dictionary<string, Shader> shaderHashToCompiledShaderMap = new Dictionary<string, Shader>();
+    private Material currentWorkingMaterial = null;
 
     [Serializable]
     struct KeyShaderPair
@@ -95,6 +96,7 @@ public class VRCBakeryAdapter : MonoBehaviour
     }
     [SerializeField]
     private List<KeyShaderPair> serializedKeyShaderPairs = new List<KeyShaderPair>();
+
     void OnDestroy()
     {
         if (!EditorApplication.isPlayingOrWillChangePlaymode && !EditorApplication.isPlaying)
@@ -114,16 +116,23 @@ public class VRCBakeryAdapter : MonoBehaviour
         return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLower();
     }
 
-    public void RevertMaterials(bool cleanupShaders = true)
+    public void RevertMaterials(bool cleanupFiles = true)
     {
         if (OriginalRendererMaterials != null)
         {
+            HashSet<Material> materialsToDelete = new HashSet<Material>();
+
             for (int i = 0; i < OriginalRendererMaterials.Length; i++)
             {
                 RendererMaterialList list = OriginalRendererMaterials[i];
 
                 if (list != null && list.renderer != null && list.materials != null)
                 {
+                    foreach (Material oldMat in list.renderer.sharedMaterials)
+                    {
+                        materialsToDelete.Add(oldMat);
+                    }
+
                     list.renderer.sharedMaterials = list.materials;
                     OriginalRendererMaterials[i] = null; // Clear so we don't keep resetting the materials
                 }
@@ -141,12 +150,17 @@ public class VRCBakeryAdapter : MonoBehaviour
 
             currentRevertPath = "";
 
-            // Cleanup
-            if (cleanupShaders)
+            // Cleanup generated shaders
+            if (cleanupFiles)
             {
                 foreach (var hashShader in serializedKeyShaderPairs)
                 {
                     AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(hashShader.shader));
+                }
+
+                foreach (var oldMat in materialsToDelete)
+                {
+                    AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(oldMat));
                 }
             }
 
@@ -291,6 +305,7 @@ public class VRCBakeryAdapter : MonoBehaviour
 
         return whitespaceCount;
     }
+
     private HashSet<string> ParseAvailablePassKeywords(string shaderText)
     {
         HashSet<string> availableKeywords = new HashSet<string>();
@@ -595,6 +610,10 @@ public class VRCBakeryAdapter : MonoBehaviour
                             if (newMaterial == null)
                             {
                                 newMaterial = new Material(material);
+
+                                // Add a reference to the object outside the stack to hopefully prevent a very rare bug where the material gets destroyed after a shader variation is generated, but before the asset is created.
+                                currentWorkingMaterial = newMaterial;
+
                                 newMaterial.SetTexture("_RNM0", RNM0);
                                 newMaterial.SetTexture("_RNM1", RNM1);
                                 newMaterial.SetTexture("_RNM2", RNM2);
@@ -628,10 +647,6 @@ public class VRCBakeryAdapter : MonoBehaviour
 
                     meshRenderer.sharedMaterials = newSharedMaterials;
                 }
-                //else
-                //{
-                //    Debug.LogWarning("RNM/SH Textures not valid for " + meshRenderer.gameObject.name);
-                //}
             }
         }
 
@@ -656,6 +671,7 @@ public class VRCBakeryAdapter : MonoBehaviour
         }
 
         shaderHashToCompiledShaderMap.Clear();
+        currentWorkingMaterial = null;
 
         Debug.Log("Converted Bakery materials for VRChat");
     }
@@ -1165,7 +1181,7 @@ public class VRCBakeryAdapterInspector : Editor
                     {
                         foreach (Material mat in list.renderer.sharedMaterials)
                         {
-                            if (mat != null && mat.shader.name.Contains("Bakery"))
+                            if (mat != null && (mat.shader.name.Contains("Bakery") || mat.shader.name.Contains("Hidden")))
                                 materialSet.Add(mat);
                         }
                     }
