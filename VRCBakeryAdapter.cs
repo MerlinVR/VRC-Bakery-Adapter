@@ -75,7 +75,7 @@ public class VRCBakeryAdapter : MonoBehaviour
     public static readonly string revertProfilePath = "Bakery/reversionProfiles/";
 
     public RendererMaterialList[] OriginalRendererMaterials;
-    public int LightmapMode = 3; // Default to SH
+    public int LightmapMode = -1; // Default to Auto which is -1
     public ReplacementScope replacementScope = ReplacementScope.Scene;
     public bool includeInactiveObjects = false;
     public string currentRevertPath = "";
@@ -153,16 +153,23 @@ public class VRCBakeryAdapter : MonoBehaviour
             // Cleanup generated shaders
             if (cleanupFiles)
             {
-                foreach (var hashShader in serializedKeyShaderPairs)
+                for (int i = 0; i < serializedKeyShaderPairs.Count; i++)
                 {
+                    EditorUtility.DisplayProgressBar("Reverting Materials", "Cleaning up generated shaders", (i / (float)serializedKeyShaderPairs.Count) * 0.5f);
+
+                    var hashShader = serializedKeyShaderPairs[i];
                     AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(hashShader.shader));
                 }
 
+                int matCounter = 0;
                 foreach (var oldMat in materialsToDelete)
                 {
+                    EditorUtility.DisplayProgressBar("Reverting Materials", "Cleaning up generated materials", (matCounter++ / (float)materialsToDelete.Count) * 0.5f + 0.5f);
                     AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(oldMat));
                 }
             }
+
+            EditorUtility.ClearProgressBar();
 
             shaderHashToCompiledShaderMap.Clear();
             serializedKeyShaderPairs.Clear();
@@ -580,6 +587,7 @@ public class VRCBakeryAdapter : MonoBehaviour
                 Texture RNM0 = propertyBlock.GetTexture("_RNM0");
                 Texture RNM1 = propertyBlock.GetTexture("_RNM1");
                 Texture RNM2 = propertyBlock.GetTexture("_RNM2");
+                int propertyLightmapMode = (int)propertyBlock.GetFloat("bakeryLightmapMode");
 
                 if (RNM0 && RNM1 && RNM2)
                 {
@@ -617,24 +625,20 @@ public class VRCBakeryAdapter : MonoBehaviour
                                 newMaterial.SetTexture("_RNM0", RNM0);
                                 newMaterial.SetTexture("_RNM1", RNM1);
                                 newMaterial.SetTexture("_RNM2", RNM2);
-                                newMaterial.SetInt("bakeryLightmapMode", LightmapMode); // SH or RNM
+                                newMaterial.SetInt("bakeryLightmapMode", LightmapMode == -1 ? propertyLightmapMode : LightmapMode); // If -1 just get the lightmap mode from the property block
 
                                 if (compileKeywords)
                                 {
                                     newMaterial.shader = GenerateShaderVariation(newMaterial);
-                                    newMaterial.shaderKeywords = new string[0];
+                                    // There's no real point to this right now since Unity will detect that this object is referencing the old materials and include them in the assetbundle regardless.
+                                    // The only half decent solution here is removing the keywords from the old materials temporarily as well which is pretty destructive and it's more work than I feel like at the moment to get it working and robust.
+                                    // Having missing keywords will also mess with the bakes since cutout and such is detected using keywords, even though people technically shouldn't be doing bakes with materials replaced we'll make an attempt to keep the bakes working.
+                                    //newMaterial.shaderKeywords = new string[0]; 
                                 }
 
                                 AssetDatabase.CreateAsset(newMaterial, savePath + "generatedbakery_" + materialFileName + "_" + matTexHash + ".mat");
 
                                 generatedMaterialList.Add(matTexHash, newMaterial);
-                            }
-                            else // We might have found an out of date material from an old bake so update its properties, this is mostly a sanity check and really shouldn't be needed
-                            {
-                                newMaterial.SetTexture("_RNM0", RNM0);
-                                newMaterial.SetTexture("_RNM1", RNM1);
-                                newMaterial.SetTexture("_RNM2", RNM2);
-                                newMaterial.SetInt("bakeryLightmapMode", LightmapMode); // SH or RNM
                             }
 
                             newSharedMaterials[j] = newMaterial;
@@ -650,8 +654,6 @@ public class VRCBakeryAdapter : MonoBehaviour
             }
         }
 
-        EditorUtility.ClearProgressBar();
-
         AssetDatabase.SaveAssets();
         EditorSceneManager.MarkSceneDirty(gameObject.scene);
 
@@ -661,6 +663,8 @@ public class VRCBakeryAdapter : MonoBehaviour
         // Be extra sure the materials are saved and such before the upload comes around.
         AssetDatabase.SaveAssets();
         EditorSceneManager.MarkSceneDirty(gameObject.scene);
+
+        AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
         AssetDatabase.SaveAssets();
 
         // Flatten out the dictionary to a list so that Unity can serialize it...
@@ -672,6 +676,8 @@ public class VRCBakeryAdapter : MonoBehaviour
 
         shaderHashToCompiledShaderMap.Clear();
         currentWorkingMaterial = null;
+
+        EditorUtility.ClearProgressBar();
 
         Debug.Log("Converted Bakery materials for VRChat");
     }
@@ -927,7 +933,7 @@ public class VRCBakeryAdapter : MonoBehaviour
         return true;
     }
 
-    public void ConvertStandardToBakeryStandard(bool useLightmapSpecular)
+    public void ConvertStandardToBakeryStandard(bool useLightmapSpecular, int lightmapModeReplacement)
     {
         Shader bakeryStandard = Shader.Find("Bakery/Standard");
         Shader bakeryStandardSpec = Shader.Find("Bakery/Standard Specular");
@@ -979,13 +985,13 @@ public class VRCBakeryAdapter : MonoBehaviour
                     }
 
                     // Enable SH or RNM depending on the directional setting
-                    if (LightmapMode == 3)
+                    if (lightmapModeReplacement == 3)
                     {
                         currentMaterial.SetInt("_BAKERY_SH", 1);
                         currentMaterial.EnableKeyword("BAKERY_SH");
                         currentMaterial.EnableKeyword("BAKERY_SHNONLINEAR");
                     }
-                    else if (LightmapMode == 2)
+                    else if (lightmapModeReplacement == 2)
                     {
                         currentMaterial.SetInt("_BAKERY_RNM", 1);
                         currentMaterial.EnableKeyword("BAKERY_RNM");
@@ -1069,19 +1075,31 @@ public class VRCBakeryAdapterInspector : Editor
     private static GUIContent directionalModeLabel = new GUIContent("Lightmap Directional Mode", "The directional mode that the Bakery lightmaps have been baked with. If you aren't using either of these options, this adapter is not necessary.");
     private static GUIContent inactiveObjectsLabel = new GUIContent("Convert Inactive Objects", "If enabled, this will also modify the materials on disabled objects.");
     private static GUIContent compileKeywordsLabel = new GUIContent("Compile Keywords", "Strips out Unity shader keywords from Bakery shaders and generates new static shaders with the proper keywords set via #defines. This lets your shaders continue to operate even when a player has run out of keywords.");
+    private static GUIContent replacementEnableSpecular = new GUIContent("Lightmap Specular", "Enables the lightmap specular option on replaced materials. This can allow your materials to get specular highlights from baked lights.");
 
     VRCBakeryAdapter adapter = null;
     private static GUIContent[] lightmapDirectionalityModes =
     {
-        new GUIContent("RNM"),
+        new GUIContent("Auto"),
         new GUIContent("SH"),
+        new GUIContent("RNM"),
     };
 
     private static int[] lightmapDirectionalityModeValues =
     {
-        2,
+        -1,
         3,
+        2,
     };
+
+    private enum ReplacementType
+    {
+        SH,
+        RNM,
+    };
+
+    private ReplacementType replacementType = ReplacementType.SH;
+    private bool useLightmapSpecular = true;
 
     public void OnEnable()
     {
@@ -1203,22 +1221,23 @@ public class VRCBakeryAdapterInspector : Editor
             
             EditorGUILayout.LabelField("Shader Replacement", EditorStyles.boldLabel);
 
-            if (GUILayout.Button("Standard->Bakery " + (adapter.LightmapMode == 3 ? "SH" : "RNM")))
-            {
-                adapter.ConvertStandardToBakeryStandard(false);
-            }
+            replacementType = (ReplacementType)EditorGUILayout.EnumPopup("Lightmap Mode", replacementType);
 
-            if (GUILayout.Button("Standard->Bakery " + (adapter.LightmapMode == 3 ? "SH" : "RNM") + " w/ Lightmap Specular"))
-            {
-                adapter.ConvertStandardToBakeryStandard(true);
-            }
-            
-            if (adapter.replaceTransparentStandard = GUILayout.Toggle(adapter.replaceTransparentStandard, "  Replace Standard Transparent with Bakery Transparent"))
+            int replacementTypeInt = 3;
+            if (replacementType == ReplacementType.RNM)
+                replacementTypeInt = 2;
+
+            useLightmapSpecular = EditorGUILayout.Toggle(replacementEnableSpecular, useLightmapSpecular);
+
+            if (adapter.replaceTransparentStandard = EditorGUILayout.Toggle("Replace Transparent Materials", adapter.replaceTransparentStandard))
             {
                 EditorGUILayout.HelpBox("This may cause your transparent objects to flicker in game! Bakery transparency will not be sorted properly in VRChat.", MessageType.Warning);
             }
 
-            EditorGUILayout.Space();
+            if (GUILayout.Button("Standard->Bakery " + (replacementTypeInt == 3 ? "SH" : "RNM") + (useLightmapSpecular ? " /w Lightmap Specular" : "")))
+            {
+                adapter.ConvertStandardToBakeryStandard(useLightmapSpecular, replacementTypeInt);
+            }
 
             if (GUILayout.Button("Bakery->Standard"))
             {
