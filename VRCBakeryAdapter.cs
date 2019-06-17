@@ -34,11 +34,12 @@ using System.IO;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Runtime.Serialization.Formatters.Binary;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
-using System.Text.RegularExpressions;
 
 [Serializable]
 public class RendererMaterialList
@@ -205,8 +206,9 @@ public class VRCBakeryAdapter : MonoBehaviour
         // Be lazy and do a 2 pass removal of commented sections of code, first block comments, then line comments
 
         int currentIdx = 0;
-        string uncommentedString = "";
         int copyRunLength = 0;
+        
+        StringBuilder uncommentedStrBuilder = new StringBuilder();
 
         // Remove block comments
         // Copy entire runs of uncommented code at a time because appending to a string char-by-char is slow as heck
@@ -214,7 +216,7 @@ public class VRCBakeryAdapter : MonoBehaviour
         {
             if (srcStr[currentIdx + copyRunLength] == '/' && currentIdx + copyRunLength + 1 < srcStr.Length && srcStr[currentIdx + copyRunLength + 1] == '*')
             {
-                uncommentedString += srcStr.Substring(currentIdx, copyRunLength);
+                uncommentedStrBuilder.Append(srcStr.Substring(currentIdx, copyRunLength));
                 currentIdx += copyRunLength;
                 copyRunLength = 0;
 
@@ -240,10 +242,11 @@ public class VRCBakeryAdapter : MonoBehaviour
 
         if (copyRunLength > 0)
         {
-            uncommentedString += srcStr.Substring(currentIdx, copyRunLength);
+            uncommentedStrBuilder.Append(srcStr.Substring(currentIdx, copyRunLength));
         }
 
-        string uncommentedString2 = "";
+        string uncommentedString = uncommentedStrBuilder.ToString();
+        uncommentedStrBuilder = new StringBuilder();
 
         // Remove line comments
         StringReader reader = new StringReader(uncommentedString);
@@ -254,10 +257,10 @@ public class VRCBakeryAdapter : MonoBehaviour
             if (commentStartIdx != -1)
                 line = line.Substring(0, commentStartIdx);
 
-            uncommentedString2 += line + "\r\n";
+            uncommentedStrBuilder.Append(line + "\r\n");
         }
 
-        return uncommentedString2;
+        return uncommentedStrBuilder.ToString();
     }
 
     // Finds the end of the current scope beginning on the codeBlockStart '{' character
@@ -359,8 +362,6 @@ public class VRCBakeryAdapter : MonoBehaviour
 
     private string ProcessPass(Material mat, string passCode)
     {
-        string processedPass = "";
-
         HashSet<string> passKeywords = ParseAvailablePassKeywords(passCode);
         HashSet<string> usedKeywords = new HashSet<string>();
         foreach (string keyword in mat.shaderKeywords)
@@ -369,6 +370,9 @@ public class VRCBakeryAdapter : MonoBehaviour
                 usedKeywords.Add(keyword);
         }
 
+        StringBuilder processedPassBuilder = new StringBuilder();
+        processedPassBuilder.Append("Pass ");
+
         StringReader reader = new StringReader(passCode);
         string line = "";
         while ((line = reader.ReadLine()) != null)
@@ -376,35 +380,25 @@ public class VRCBakeryAdapter : MonoBehaviour
             // Insert the #defines for this variant
             if (line.Contains("CGPROGRAM") || line.Contains("HLSLPROGRAM"))
             {
-                processedPass += line + "\r\n"; // Add the CGPROGRAM line
+                processedPassBuilder.AppendFormat("{0}\r\n", line); // Add the CGPROGRAM line
 
                 int whitespaceCount = GetWhiteSpace(line);
 
                 foreach (string keyword in usedKeywords)
                 {
-                    string defineStr = "#define " + keyword + " 1";
+                    string defineStr = string.Format("#define {0} 1", keyword);
                     defineStr = defineStr.PadLeft(whitespaceCount + defineStr.Length);
 
-                    processedPass += defineStr + "\r\n";
+                    processedPassBuilder.AppendFormat("{0}\r\n", defineStr);
                 }
-            }
-            else if (line.Contains("#pragma shader_feature ") || line.Contains("#pragma multi_compile "))
-            {
-#if false
-                string outputStr = "// Removed shader_feature or multi_compile\r\n";
-                int whitespace = GetWhiteSpace(line);
-                outputStr = outputStr.PadLeft(whitespace + outputStr.Length);
-
-                processedPass += outputStr;
-#endif
             }
             else
             {
-                processedPass += line + "\r\n";
+                processedPassBuilder.AppendFormat("{0}\r\n", line);
             }
         }
 
-        return "Pass " + processedPass;
+        return processedPassBuilder.ToString();
     }
 
     private Shader GenerateShaderVariation(Material mat)
@@ -448,7 +442,7 @@ public class VRCBakeryAdapter : MonoBehaviour
         
         shaderText = StripComments(shaderText);
 
-        string finalShaderCode = "";
+        StringBuilder finalShaderCodeBuilder = new StringBuilder();
 
         // Search for Passes to replace 
         int passIdx = 0;
@@ -464,7 +458,7 @@ public class VRCBakeryAdapter : MonoBehaviour
                 break;
 
             // Splice in all sections in between passes
-            finalShaderCode += shaderText.Substring(lastPassIdx, passIdx - lastPassIdx);
+            finalShaderCodeBuilder.Append(shaderText.Substring(lastPassIdx, passIdx - lastPassIdx));
 
             int passStartIdx = passIdx + 4;
             while (passStartIdx < shaderText.Length)
@@ -484,14 +478,14 @@ public class VRCBakeryAdapter : MonoBehaviour
             // This isn't the pass we're looking for... It's some other piece of code that has the word 'pass' in it.
             if (passStartIdx == -1)
             {
-                finalShaderCode += shaderText.Substring(passIdx, 4);
+                finalShaderCodeBuilder.Append(shaderText.Substring(passIdx, 4));
                 passIdx += 4;
                 continue;
             }
 
             int passEndIdx = FindCodeBlockEnd(shaderText, passStartIdx) + 1;
 
-            finalShaderCode += ProcessPass(mat, shaderText.Substring(passStartIdx, passEndIdx - passStartIdx));
+            finalShaderCodeBuilder.Append(ProcessPass(mat, shaderText.Substring(passStartIdx, passEndIdx - passStartIdx)));
 
             passIdx = passEndIdx;
         }
@@ -499,8 +493,10 @@ public class VRCBakeryAdapter : MonoBehaviour
         // Patch in the last bit of code after the last pass
         if (lastPassIdx < shaderText.Length)
         {
-            finalShaderCode += shaderText.Substring(lastPassIdx);
+            finalShaderCodeBuilder.Append(shaderText.Substring(lastPassIdx));
         }
+
+        string finalShaderCode = finalShaderCodeBuilder.ToString();
 
         // Give the shader a unique name under Hidden/<shader hash>
         // In hindsight I probably should've just bit the bullet and did more of this using Regex
