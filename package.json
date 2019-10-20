@@ -1,0 +1,16 @@
+{
+  "name": "com.merlin.vrcbakeryadapter",
+  "displayName": "VRC Bakery Adapter",
+  "version": "0.4.0",
+  "unity": "2017.4",
+  "description": "A script that handles converting Bakery RNM and SH directional lightmap bindings into a format that VRChat can process",
+  "keywords": ["VRChat", "VRC", "Bakery", "Lightmap"],
+  "category": "Productivity",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Merlin-san/VRC-Bakery-Adapter"
+  },
+  "author": {
+	"name" : "Merlin"
+  }
+} 
