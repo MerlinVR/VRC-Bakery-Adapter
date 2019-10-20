@@ -26,26 +26,30 @@
  * A mostly self-contained script to handle replacing Bakery SH or RNM directional lightmap values so that VRC can support them.
  * This is so long mostly because I'm paranoid about making the process somewhat robust and difficult to break to a point where you lose data. The original script was like 1/3 the length it is now.
  * This script will go and automatically patch your Bakery shaders to support saving the directional lightmap properties into the material. This will not interfere with the usual behavior of Bakery.
- */ 
+ */
 
 #if UNITY_EDITOR
 using System;
-using System.IO;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
+using System.Runtime.Serialization.Formatters.Binary;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Runtime.Serialization.Formatters.Binary;
-using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using UnityEngine;
+
+namespace Merlin
+{
 
 [Serializable]
 public class RendererMaterialList
 {
     public MeshRenderer renderer;
     public Material[] materials;
+    public Material[] generatedMaterials;
 };
 
 // I'm sorry for these names, I made them when I was annoyed that I had to make them.
@@ -73,6 +77,7 @@ public enum ReplacementScope
 public class VRCBakeryAdapter : MonoBehaviour
 {
     private static readonly string savePath = "Assets/Bakery/generated/";
+    private static readonly string GeneratedMaterialPrefix = "generatedbakery_";
     public static readonly string revertProfilePath = "Bakery/reversionProfiles/";
 
     public RendererMaterialList[] OriginalRendererMaterials;
@@ -129,9 +134,12 @@ public class VRCBakeryAdapter : MonoBehaviour
 
                 if (list != null && list.renderer != null && list.materials != null)
                 {
-                    foreach (Material oldMat in list.renderer.sharedMaterials)
+                    if (list.generatedMaterials != null)
                     {
-                        materialsToDelete.Add(oldMat);
+                        foreach (Material oldMat in list.generatedMaterials)
+                        {
+                            materialsToDelete.Add(oldMat);
+                        }
                     }
 
                     list.renderer.sharedMaterials = list.materials;
@@ -166,7 +174,12 @@ public class VRCBakeryAdapter : MonoBehaviour
                 foreach (var oldMat in materialsToDelete)
                 {
                     EditorUtility.DisplayProgressBar("Reverting Materials", "Cleaning up generated materials", (matCounter++ / (float)materialsToDelete.Count) * 0.5f + 0.5f);
-                    AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(oldMat));
+
+                    // Make sure we don't delete the original materials if someone manages to hit a really bad edge case.
+                    if (Path.GetFileNameWithoutExtension(AssetDatabase.GetAssetPath(oldMat)).StartsWith(GeneratedMaterialPrefix))
+                    {
+                        AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(oldMat));
+                    }
                 }
             }
 
@@ -207,7 +220,7 @@ public class VRCBakeryAdapter : MonoBehaviour
 
         int currentIdx = 0;
         int copyRunLength = 0;
-        
+            
         StringBuilder uncommentedStrBuilder = new StringBuilder();
 
         // Remove block comments
@@ -560,7 +573,7 @@ public class VRCBakeryAdapter : MonoBehaviour
                 if (mat != null)
                 {
                     string materialFileName = Path.GetFileNameWithoutExtension(AssetDatabase.GetAssetPath(mat));
-                    if (materialFileName.StartsWith("generatedbakery_"))
+                    if (materialFileName.StartsWith(GeneratedMaterialPrefix))
                     {
                         // Prevent conflicts with other collectors that could make restoring materials a mess for the user.
                         skipRenderer = true;
@@ -632,7 +645,7 @@ public class VRCBakeryAdapter : MonoBehaviour
                                     //newMaterial.shaderKeywords = new string[0]; 
                                 }
 
-                                AssetDatabase.CreateAsset(newMaterial, savePath + "generatedbakery_" + materialFileName + "_" + matTexHash + ".mat");
+                                AssetDatabase.CreateAsset(newMaterial, savePath + GeneratedMaterialPrefix + materialFileName + "_" + matTexHash + ".mat");
 
                                 generatedMaterialList.Add(matTexHash, newMaterial);
                             }
@@ -646,6 +659,7 @@ public class VRCBakeryAdapter : MonoBehaviour
                     }
 
                     meshRenderer.sharedMaterials = newSharedMaterials;
+                    OriginalRendererMaterials[i].generatedMaterials = meshRenderer.sharedMaterials;
                 }
             }
         }
@@ -951,6 +965,12 @@ public class VRCBakeryAdapter : MonoBehaviour
             }
         }
 
+        if (materialList.Count == 0)
+        {
+            Debug.Log("No materials needed converting for Standard to Bakery Standard.");
+            return;
+        }
+
         Material[] matArray = new Material[materialList.Count];
         int idx = 0;
         foreach (Material mat in materialList)
@@ -1021,6 +1041,12 @@ public class VRCBakeryAdapter : MonoBehaviour
             }
         }
 
+        if (materialList.Count == 0)
+        {
+            Debug.Log("No materials needed converting for Bakery Standard to Standard.");
+            return;
+        }
+
         Material[] matArray = new Material[materialList.Count];
         int idx = 0;
         foreach (Material mat in materialList)
@@ -1088,13 +1114,21 @@ public class VRCBakeryAdapterInspector : Editor
         2,
     };
 
-    private enum ReplacementType
+    private static GUIContent[] lightmapReplacementTypes =
     {
-        SH,
-        RNM,
+        new GUIContent("None"),
+        new GUIContent("SH"),
+        new GUIContent("RNM"),
     };
 
-    private ReplacementType replacementType = ReplacementType.SH;
+    private static int[] lightmapReplacementTypeValues =
+    {
+        0,
+        3,
+        2,
+    };
+
+    private int replacementType = 3;
     private bool useLightmapSpecular = true;
 
     public void OnEnable()
@@ -1217,11 +1251,7 @@ public class VRCBakeryAdapterInspector : Editor
             
             EditorGUILayout.LabelField("Shader Replacement", EditorStyles.boldLabel);
 
-            replacementType = (ReplacementType)EditorGUILayout.EnumPopup("Lightmap Mode", replacementType);
-
-            int replacementTypeInt = 3;
-            if (replacementType == ReplacementType.RNM)
-                replacementTypeInt = 2;
+            replacementType = EditorGUILayout.IntPopup(new GUIContent("Lightmap Mode"), replacementType, lightmapReplacementTypes, lightmapReplacementTypeValues);
 
             useLightmapSpecular = EditorGUILayout.Toggle(replacementEnableSpecular, useLightmapSpecular);
 
@@ -1230,9 +1260,9 @@ public class VRCBakeryAdapterInspector : Editor
                 EditorGUILayout.HelpBox("This may cause your transparent objects to flicker in game! Bakery transparency will not be sorted properly in VRChat.", MessageType.Warning);
             }
 
-            if (GUILayout.Button("Standard->Bakery " + (replacementTypeInt == 3 ? "SH" : "RNM") + (useLightmapSpecular ? " /w Lightmap Specular" : "")))
+            if (GUILayout.Button("Standard->Bakery" + (replacementType == 0 ? "" : (replacementType == 3 ? " SH" : " RNM")) + (useLightmapSpecular ? " /w Lightmap Specular" : "")))
             {
-                adapter.ConvertStandardToBakeryStandard(useLightmapSpecular, replacementTypeInt);
+                adapter.ConvertStandardToBakeryStandard(useLightmapSpecular, replacementType);
             }
 
             if (GUILayout.Button("Bakery->Standard"))
@@ -1286,4 +1316,6 @@ public class VRCBakeryAdapterInspector : Editor
         EditorGUI.EndDisabledGroup(); // Play mode disabled group
     }
 }
+
+} // namespace Merlin
 #endif
